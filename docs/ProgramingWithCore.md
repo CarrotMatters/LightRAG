@@ -302,6 +302,52 @@ class QueryParam:
 > The default value of `top_k` can be changed by the environment variable `TOP_K`.
 
 
+## Check evidence before generation
+
+Use `check_query_evidence` to assess the text chunks from `aquery_data()`. It is an optional step that takes an async checker supplied by the caller. The checker receives the original question, the questions to assess, and the retrieved chunks. For each requested question it returns a list of citations with `chunk_id` and `quote`, or an empty list if the retrieved text cannot support an answer.
+
+```python
+from lightrag.evidence import check_query_evidence
+
+question = "What documents are required and what is the nightly lodging cap?"
+retrieval = await rag.aquery_data(question)
+assessment = await check_query_evidence(
+    question,
+    retrieval,
+    my_async_checker,
+    subquestions=["What documents are required?", "What is the nightly lodging cap?"],
+)
+```
+
+The result includes an ordered assessment for each question. `sufficient` means every requested question has at least one validated citation, `partial` means only some do, and `insufficient` means none do. Pass explicit `subquestions` to get separate assessments. The default assesses the original question as a single item.
+
+Validation checks that each cited chunk came from this retrieval and that the quote appears verbatim in that chunk. Semantic support is the checker's responsibility. The checker is skipped for empty retrieval. Other retrieval failures, checker exceptions, and invalid citations raise `EvidenceCheckError` so callers can distinguish a failed check from missing evidence.
+
+### Generate an answer from checked evidence
+
+Pass the same checker to the non-streaming SDK query entry point. The SDK retrieves once and sends only verified excerpts for supported subquestions to the query model.
+
+```python
+result = await rag.aquery_llm(
+    question,
+    evidence_checker=my_async_checker,
+    evidence_subquestions=[
+        "What documents are required?",
+        "What is the nightly lodging cap?",
+    ],
+)
+
+if result.get("evidence"):
+    print(result["evidence"]["status"])
+    print(result["llm_response"]["content"])
+else:
+    print(result["metadata"].get("failure_reason"), result["message"])
+```
+
+The `evidence.questions` array contains citations for each subquestion, including their chunk IDs, excerpts, and source paths when available. The answer includes a source list and identifies subquestions with insufficient evidence. If no subquestion has support, the SDK skips answer generation. The top-level status still reflects retrieval, so an empty retrieval can have status `failure` with reason `no_results` and an `insufficient` evidence assessment.
+
+Checker errors return `evidence_check_failed`. Exceptions during retrieval or answer generation return `evidence_retrieval_failed` or `evidence_generation_failed`, respectively. The checked generation prompt uses the current query's evidence, the configured response format, and any explicit `system_prompt` guidance. It excludes conversation history and custom user prompts. This option raises `ValueError` for streaming, bypass, context-only, or prompt-only requests.
+
 ## LLM and Embedding Injection
 
 LightRAG requires LLM and Embedding models for document indexing and querying. During initialization, inject the relevant model functions into LightRAG.
